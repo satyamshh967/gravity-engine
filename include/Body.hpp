@@ -1,11 +1,23 @@
 #pragma once
 
+#include "Rgba.hpp"
 #include "Vec2.hpp"
-#include <string>
-#include <deque>
+
 #include <algorithm>
 #include <cmath>
-#include <raylib.h>
+#include <deque>
+#include <numbers>
+#include <string>
+
+// Single source of truth for size/mass limits (spawner, inspector and merges).
+namespace limits {
+inline constexpr double kMinMass = 0.01;
+inline constexpr double kMaxMass = 1.0e6;
+inline constexpr double kMinRadius = 1.0;
+inline constexpr double kMaxRadius = 140.0;
+inline constexpr double kMinDensity = 1.0e-4;
+inline constexpr double kMaxDensity = 1.0e4;
+} // namespace limits
 
 struct Body {
     int id{0};
@@ -15,85 +27,58 @@ struct Body {
     Vec2 pos{0.0, 0.0};
     Vec2 vel{0.0, 0.0};
     Vec2 acc{0.0, 0.0};
-    Color color{RAYWHITE};
+    Rgba color{};
     bool isStatic{false};
-    
+    bool isDebris{false}; // fragments / disk particles: no name labels, smaller trails
+
     // Orbital trail history
     std::deque<Vec2> trail;
-    size_t maxTrailPoints{350};
-    double minTrailDistSq{4.0}; // minimum squared distance between trail points to avoid clumping
+    std::size_t maxTrailPoints{350};
+    double minTrailDistSq{4.0}; // avoids clumping of trail points
 
     Body() = default;
 
     Body(int id_, std::string name_, double mass_, double radius_,
-         Vec2 pos_, Vec2 vel_, Color color_, bool isStatic_ = false)
+         Vec2 pos_, Vec2 vel_, Rgba color_, bool isStatic_ = false)
         : id(id_),
           name(std::move(name_)),
           mass(mass_),
           radius(radius_),
           pos(pos_),
-          vel(vel_),
-          acc(0.0, 0.0),
+          vel(isStatic_ ? Vec2{} : vel_),
           color(color_),
           isStatic(isStatic_) {}
 
     void addTrailPoint(const Vec2& p) {
-        if (!trail.empty()) {
-            if (trail.back().distanceSq(p) < minTrailDistSq) {
-                return;
-            }
-        }
+        if (maxTrailPoints == 0) return;
+        if (!trail.empty() && trail.back().distanceSq(p) < minTrailDistSq) return;
         trail.push_back(p);
-        if (trail.size() > maxTrailPoints) {
-            trail.pop_front();
-        }
+        while (trail.size() > maxTrailPoints) trail.pop_front();
     }
 
-    void clearTrail() {
-        trail.clear();
+    void clearTrail() { trail.clear(); }
+
+    // 2D "density": mass per disk area.
+    [[nodiscard]] double density() const {
+        return radius > 1e-9 ? mass / (std::numbers::pi * radius * radius) : 0.0;
     }
 
-    // Physical diagnostics and property mutators
-    [[nodiscard]] double getDensity() const {
-        constexpr double kPi = 3.14159265358979323846;
-        if (radius > 1e-6) {
-            return mass / (kPi * radius * radius);
-        }
-        return 0.0;
-    }
+    void setRadius(double r) { radius = std::clamp(r, limits::kMinRadius, limits::kMaxRadius); }
 
     void setDensity(double d) {
-        constexpr double kPi = 3.14159265358979323846;
-        if (d > 1e-6) {
-            radius = std::clamp(std::sqrt(mass / (kPi * d)), 1.5, 120.0);
-        }
+        d = std::clamp(d, limits::kMinDensity, limits::kMaxDensity);
+        setRadius(std::sqrt(mass / (std::numbers::pi * d)));
     }
 
+    // Changes mass while keeping density (radius follows, within limits).
     void setMass(double m) {
-        double d = getDensity();
-        mass = std::max(m, 0.0001);
-        if (d > 1e-6) {
-            setDensity(d); // Maintain density by adjusting radius
-        }
+        const double d = density();
+        mass = std::clamp(m, limits::kMinMass, limits::kMaxMass);
+        if (d > 0.0) setDensity(d);
     }
 
-    void setRadius(double r) {
-        radius = std::clamp(r, 1.5, 120.0);
-    }
-
-    [[nodiscard]] double getSurfaceGravity(double G, double epsilon) const {
-        double rSq = radius * radius;
-        double denom = rSq + epsilon * epsilon;
-        if (denom > 1e-12) {
-            return (G * mass) / denom;
-        }
-        return 0.0;
-    }
-
-    [[nodiscard]] double getEscapeVelocity(double G) const {
-        if (radius > 1e-6) {
-            return std::sqrt(2.0 * G * mass / radius);
-        }
-        return 0.0;
+    void setStatic(bool s) {
+        isStatic = s;
+        if (s) vel = Vec2{};
     }
 };

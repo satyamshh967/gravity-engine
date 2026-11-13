@@ -1,8 +1,9 @@
 #pragma once
 
 #include <cmath>
-#include <raylib.h>
 
+// Lightweight 2D double-precision vector. Deliberately free of any graphics
+// dependency so the physics core can be built and tested without raylib.
 struct Vec2 {
     double x{0.0};
     double y{0.0};
@@ -10,103 +11,40 @@ struct Vec2 {
     constexpr Vec2() = default;
     constexpr Vec2(double x_, double y_) : x(x_), y(y_) {}
 
-    // Vector operations
-    constexpr Vec2 operator+(const Vec2& rhs) const noexcept {
-        return Vec2{x + rhs.x, y + rhs.y};
-    }
+    constexpr Vec2 operator+(const Vec2& rhs) const noexcept { return {x + rhs.x, y + rhs.y}; }
+    constexpr Vec2 operator-(const Vec2& rhs) const noexcept { return {x - rhs.x, y - rhs.y}; }
+    constexpr Vec2 operator*(double s) const noexcept { return {x * s, y * s}; }
+    friend constexpr Vec2 operator*(double s, const Vec2& v) noexcept { return {v.x * s, v.y * s}; }
+    // Plain IEEE division: dividing by zero yields inf/nan instead of silently
+    // returning a zero vector and hiding the bug. Use normalized() when a safe
+    // direction is needed.
+    constexpr Vec2 operator/(double s) const noexcept { return {x / s, y / s}; }
+    constexpr Vec2 operator-() const noexcept { return {-x, -y}; }
 
-    constexpr Vec2 operator-(const Vec2& rhs) const noexcept {
-        return Vec2{x - rhs.x, y - rhs.y};
-    }
+    constexpr Vec2& operator+=(const Vec2& rhs) noexcept { x += rhs.x; y += rhs.y; return *this; }
+    constexpr Vec2& operator-=(const Vec2& rhs) noexcept { x -= rhs.x; y -= rhs.y; return *this; }
+    constexpr Vec2& operator*=(double s) noexcept { x *= s; y *= s; return *this; }
+    constexpr Vec2& operator/=(double s) noexcept { x /= s; y /= s; return *this; }
 
-    constexpr Vec2 operator*(double scalar) const noexcept {
-        return Vec2{x * scalar, y * scalar};
-    }
+    constexpr bool operator==(const Vec2&) const = default;
 
-    friend constexpr Vec2 operator*(double scalar, const Vec2& vec) noexcept {
-        return Vec2{vec.x * scalar, vec.y * scalar};
-    }
+    [[nodiscard]] constexpr double dot(const Vec2& rhs) const noexcept { return x * rhs.x + y * rhs.y; }
+    // z-component of the 3D cross product (signed parallelogram area).
+    [[nodiscard]] constexpr double cross(const Vec2& rhs) const noexcept { return x * rhs.y - y * rhs.x; }
+    [[nodiscard]] constexpr double lengthSq() const noexcept { return x * x + y * y; }
+    [[nodiscard]] double length() const noexcept { return std::sqrt(lengthSq()); }
+    [[nodiscard]] constexpr Vec2 perp() const noexcept { return {-y, x}; }
 
-    constexpr Vec2 operator/(double scalar) const noexcept {
-        double inv = (scalar != 0.0) ? (1.0 / scalar) : 0.0;
-        return Vec2{x * inv, y * inv};
-    }
-
-    constexpr Vec2 operator-() const noexcept {
-        return Vec2{-x, -y};
-    }
-
-    // Compound assignment operators
-    constexpr Vec2& operator+=(const Vec2& rhs) noexcept {
-        x += rhs.x;
-        y += rhs.y;
-        return *this;
-    }
-
-    constexpr Vec2& operator-=(const Vec2& rhs) noexcept {
-        x -= rhs.x;
-        y -= rhs.y;
-        return *this;
-    }
-
-    constexpr Vec2& operator*=(double scalar) noexcept {
-        x *= scalar;
-        y *= scalar;
-        return *this;
-    }
-
-    constexpr Vec2& operator/=(double scalar) noexcept {
-        double inv = (scalar != 0.0) ? (1.0 / scalar) : 0.0;
-        x *= inv;
-        y *= inv;
-        return *this;
-    }
-
-    constexpr bool operator==(const Vec2& rhs) const noexcept {
-        return x == rhs.x && y == rhs.y;
-    }
-
-    constexpr bool operator!=(const Vec2& rhs) const noexcept {
-        return !(*this == rhs);
-    }
-
-    // Math methods
-    [[nodiscard]] constexpr double dot(const Vec2& rhs) const noexcept {
-        return x * rhs.x + y * rhs.y;
-    }
-
-    [[nodiscard]] constexpr double lengthSq() const noexcept {
-        return x * x + y * y;
-    }
-
-    [[nodiscard]] double length() const noexcept {
-        return std::sqrt(lengthSq());
-    }
-
+    // Unit vector, or (0,0) for a (near) zero-length vector.
     [[nodiscard]] Vec2 normalized() const noexcept {
-        double len = length();
-        if (len > 1e-14) {
-            return *this / len;
-        }
-        return Vec2{0.0, 0.0};
+        const double len = length();
+        return (len > 1e-14) ? Vec2{x / len, y / len} : Vec2{0.0, 0.0};
     }
 
     [[nodiscard]] constexpr double distanceSq(const Vec2& rhs) const noexcept {
-        double dx = rhs.x - x;
-        double dy = rhs.y - y;
+        const double dx = rhs.x - x;
+        const double dy = rhs.y - y;
         return dx * dx + dy * dy;
     }
-
-    [[nodiscard]] double distance(const Vec2& rhs) const noexcept {
-        return std::sqrt(distanceSq(rhs));
-    }
-
-    // Raylib Vector2 conversion
-    [[nodiscard]] Vector2 toVector2() const noexcept {
-        return Vector2{static_cast<float>(x), static_cast<float>(y)};
-    }
-
-    [[nodiscard]] static Vec2 fromVector2(const Vector2& v) noexcept {
-        return Vec2{static_cast<double>(v.x), static_cast<double>(v.y)};
-    }
+    [[nodiscard]] double distance(const Vec2& rhs) const noexcept { return std::sqrt(distanceSq(rhs)); }
 };

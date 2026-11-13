@@ -1,5 +1,6 @@
-# 🌌 2D N-Body Gravity Engine (C++20 & Raylib)
+# 2D N-Body Gravity Engine (C++20 & raylib)
 
+<<<<<<< HEAD
 > **High-performance, modular 2D N-Body celestial mechanics and gravity simulation engine built with modern C++20 and Raylib.**
 
 [![C++20](https://img.shields.io/badge/Language-C%2B%2B20-00599C?style=flat-square&logo=cplusplus&logoColor=white)](https://en.cppreference.com/w/cpp/20)
@@ -64,25 +65,94 @@ A high-performance, modular 2D N-Body celestial mechanics and gravity simulation
 ```text
 ├── CMakeLists.txt              # Build configuration (local raylib or FetchContent)
 ├── Launch Gravity Engine.bat   # One-click Windows launcher
+=======
+An interactive 2D gravity sandbox: launch planets with a slingshot, watch orbits, merge or shatter worlds, and drop anvils and apples in an Earth gravity lab. The physics core is a standalone library with its own test suite; the app is built on raylib.
+
+---
+
+## Features
+
+**Physics**
+- **Newtonian N-body gravity** with Plummer softening: `a = G M r / (r^2 + eps^2)^1.5`.
+- **Integrators:** Velocity Verlet (2nd order, energy-stable, default) and Symplectic Euler (1st order, for comparison).
+- **Fixed timestep** of 0.002 s, run separately from the frame rate. The app has a per-frame CPU budget: if it can't keep up, the HUD shows the real speed instead of silently slowing down.
+- **Collision modes:**
+  - **Merge:** momentum, mass, centre of mass and disk area are conserved.
+  - **Shatter:** an impact shatters both bodies if its energy exceeds the pair's gravitational binding energy (`G M^2 / R`). Fragments conserve mass, momentum and centre of mass exactly. Gentler impacts merge.
+  - **Bounce:** elastic impulses with adjustable restitution.
+  - **Ghost:** bodies pass through each other.
+- **Explosions (`K`):** shatter any body into fragments that are ejected faster than its escape velocity. Mass and momentum are conserved.
+- **Sweep-and-prune collision detection:** only nearby pairs are tested.
+- **Energy drift readout:** the drift baseline resets automatically on every discontinuous change (spawn, merge, edit and so on), so the number always means something.
+
+**Scenes** (keys `1`-`4`, `0` for empty space)
+1. **Solar System:** a dynamic Sun, 6 planets, 4 moons and a Halley-style comet. Planets are more than 3.5 mutual Hill radii apart, and every moon orbits inside about 0.45 of its planet's Hill radius, so the system stays stable.
+2. **Figure-8:** the Chenciner-Montgomery three-body choreography, with about a 27 s period.
+3. **Binary + Disk:** two stars with a 220-particle dust disk that starts at 3x the binary separation, where circumbinary orbits are stable.
+4. **Earth Gravity Lab:** a uniform g = 9.81 m/s^2 at 73.4 px per metre.
+   - A 500 kg anvil and a 0.5 kg apple fall identically (Galileo).
+   - Anything dropped from above the critical height (about 4.4 m, an impact faster than 9.3 m/s) shatters.
+   - g, bounciness and shatter speed are adjustable live.
+
+**Interface**
+- **Slingshot launch** with a live N-body path preview. The path is colour-coded green (bound orbit), orange (escape) or red (impact or shatter), with a readout of launch speed and outcome.
+- **Sidebar** (slides in and out, scrollable, three tabs):
+  - **Inspect:** mass, radius and density sliders, live readouts (speed, acceleration, surface gravity, escape velocity, orbital period, eccentricity), orbit status, halt / reverse / boost / circularize / anchor / explode / delete, and colour.
+  - **Spawn:** payload presets with a live preview, spawn mode (slingshot, auto orbit, stationary), sliders, colour and path-preview length.
+  - **World:** scene picker, integrator and collision mode, physics constants (G, softening, restitution, shatter threshold, or the lab's g and bounciness), display toggles, UI scale, and reload/clear.
+- **Clickable HUD** (integrator, collision mode) and a **time bar** with play/pause, single step, a speed slider and display toggles.
+- **Feel and feedback:**
+  - Toast notifications for merges, shatters and explosions.
+  - Hover cards on bodies and tooltips on every control.
+  - Animated buttons.
+  - A parallax starfield and an adaptive grid.
+  - Camera shake, screen flash and smooth camera framing.
+  - A help overlay (`F1`).
+- **Display:** the UI scales with monitor DPI (adjustable), and fonts are mipmapped so they stay crisp.
+
+---
+
+## Project structure
+
+```
+├── CMakeLists.txt            # gravity_core (no graphics), GravityTests (CTest), GravityEngine app
+>>>>>>> 47baf75 (Fixed physics bugs and redesigned interactive UI)
 ├── include/
-│   ├── Vec2.hpp                # Lightweight 2D double-precision vector math
-│   ├── Body.hpp                # Celestial body struct & trail history
-│   ├── LaunchSettings.hpp      # Spawner configuration, presets & modes
-│   ├── GravityEngine.hpp       # Physics solver, celestial presets & querying
-│   └── Renderer.hpp            # Raylib camera, trails, bodies, HUD & UI panels
+│   ├── Vec2.hpp, Rgba.hpp    # math + colour, no raylib dependency
+│   ├── Body.hpp              # body state, trail, shared size/mass limits
+│   ├── Effects.hpp           # sparks, shockwaves, shake, flash (visual only)
+│   ├── GravityEngine.hpp     # physics engine API
+│   ├── LaunchSettings.hpp    # spawner payload presets
+│   ├── PhysicsTests.hpp      # headless test suite entry point
+│   ├── Ui.hpp                # immediate-mode UI toolkit (buttons, chips, sliders, tooltips)
+│   └── Renderer.hpp          # camera, world drawing, HUD, sidebar
 ├── src/
+<<<<<<< HEAD
 │   ├── GravityEngine.cpp       # Verlet/Euler integration, collision & energy math
 │   ├── Renderer.cpp            # Visual rendering & interactive GUI panels
 │   └── main.cpp                # App loop, accumulator, input routing & headless test
 └── README.md
+=======
+│   ├── GravityEngine.cpp     # integration, collisions, fragmentation, queries
+│   ├── Scenes.cpp            # preset scenes
+│   ├── PhysicsTests.cpp      # conservation & regression tests
+│   ├── Ui.cpp, Renderer.cpp, Sidebar.cpp
+│   └── main.cpp              # input, fixed-step loop, event handling
+└── tests/run_tests.cpp       # CTest runner
+>>>>>>> 47baf75 (Fixed physics bugs and redesigned interactive UI)
 ```
 
 ---
 
+<<<<<<< HEAD
 ## 🎮 Controls & Keybindings
+=======
+## Controls
+>>>>>>> 47baf75 (Fixed physics bugs and redesigned interactive UI)
 
-| Key / Input | Action |
+| Input | Action |
 |---|---|
+<<<<<<< HEAD
 | `Left Click Body` | Select and open **Object Inspector** in sidebar |
 | `H` | Hide / Show **Right Sidebar** |
 | `TAB` | Toggle between **Inspector** and **Spawner** tabs |
@@ -115,16 +185,43 @@ A high-performance, modular 2D N-Body celestial mechanics and gravity simulation
 ### Prerequisites
 - Modern C++ compiler supporting **C++20** (GCC 11+, Clang 13+, or MSVC 2022)
 - **CMake** (v3.20+) and **Ninja** / Make
+=======
+| Left click body | Select and inspect |
+| Left drag in space | Slingshot launch (mouse wheel while dragging changes mass, right click cancels) |
+| Right drag / WASD / arrows | Pan |
+| Mouse wheel | Zoom to cursor |
+| `Space` / `N` | Pause / step one frame |
+| `[` `]` or `,` `.` | Slower / faster (0.1x to 20x) |
+| `1` `2` `3` `4` / `0` | Scenes / empty space |
+| `I` / `C` | Integrator / collision mode |
+| `K` / `Delete` | Explode / delete selected body |
+| `T` `V` `G` `L` | Trails / velocity vectors / grid / labels |
+| `F` / `R` | Follow heaviest / re-frame scene |
+| `H` / `Tab` | Sidebar / next tab |
+| `X` twice | Clear all bodies |
+| `+` / `-` | Launch mass |
+| `Esc` | Close help, then cancel drag, then deselect, then hide sidebar |
+| `F1` or `?` | Help overlay |
 
-### Build Commands
+---
+
+## Building
+>>>>>>> 47baf75 (Fixed physics bugs and redesigned interactive UI)
+
 ```bash
+<<<<<<< HEAD
 # Generate build files
 cmake -B build -G "Ninja"
 
 # Compile executable
+=======
+cmake -B build -G Ninja          # defaults to a Release build
+>>>>>>> 47baf75 (Fixed physics bugs and redesigned interactive UI)
 cmake --build build
+./build/GravityEngine            # or double-click "Launch Gravity Engine.bat" (builds if needed)
 ```
 
+<<<<<<< HEAD
 ### Running the Application
 ```bash
 # Graphical Simulation
@@ -138,3 +235,29 @@ cmake --build build
 
 ## 👤 Author
 - **Satyam Sharma** - [@satyamshh967](https://github.com/satyamshh967)
+=======
+raylib 5.x is used if it is installed; otherwise raylib 5.5 is fetched automatically.
+
+## Tests
+
+```bash
+ctest --test-dir build --output-on-failure   # or: ./build/GravityTests, or: ./build/GravityEngine --test
+```
+
+The suite checks:
+- Energy drift over a **full** orbit.
+- Conservation of mass, momentum and centre of mass in merges, shatters and explosions.
+- Wall bounces in the room.
+- Galileo free fall and floor shatter.
+- Energy-baseline resets.
+- Long-term stability of the solar system's moons.
+- The figure-8 choreography.
+- Slingshot-preview accuracy.
+- Unique body ids.
+
+To build only the physics core and tests (no raylib needed):
+
+```bash
+cmake -B build -DGRAVITY_BUILD_APP=OFF && cmake --build build && ctest --test-dir build
+```
+>>>>>>> 47baf75 (Fixed physics bugs and redesigned interactive UI)

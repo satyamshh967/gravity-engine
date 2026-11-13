@@ -1,420 +1,488 @@
 #include "GravityEngine.hpp"
-#include "Renderer.hpp"
 #include "LaunchSettings.hpp"
-#include <iostream>
-#include <iomanip>
-#include <string>
-#include <cstring>
-#include <cmath>
-#include <random>
+#include "PhysicsTests.hpp"
+#include "Renderer.hpp"
+
+#include <raylib.h>
+
 #include <algorithm>
+#include <cmath>
+#include <cstring>
+#include <string>
 
-int runHeadlessPhysicsTest() {
-    std::cout << "========================================================\n";
-    std::cout << "  RUNNING 2D N-BODY GRAVITY ENGINE HEADLESS UNIT TEST   \n";
-    std::cout << "========================================================\n\n";
+namespace {
 
+struct App {
     GravityEngine engine;
-    engine.loadTwoBodyOrbitTest();
-    engine.integrator = IntegratorType::VelocityVerlet;
-    engine.fixedDt = 0.002;
+    Renderer renderer;
+    LaunchSettings launch;
+    SimStats stats;
 
-    double e0 = engine.computeTotalEnergy();
-    std::cout << "[TEST] Integrator: Velocity Verlet\n";
-    std::cout << "[TEST] Initial Mechanical Energy E0 = " << std::setprecision(10) << e0 << "\n";
+    float timeScale{1.0f};
+    double accumulator{0.0};
+    bool pendingStep{false};
+    float lagHold{0.0f};
 
-    const int totalSteps = 1000;
-    for (int step = 1; step <= totalSteps; ++step) {
-        engine.step(engine.fixedDt);
+    int selectedId{-1};
+    int hoveredId{-1};
+
+    bool dragging{false};
+    Vec2 dragStart{};
+    Vec2 dragCurrent{};
+    bool rightPanning{false};
+    TrajectoryPrediction prediction;
+
+    double clearArmedUntil{-1.0};
+    int cursor{MOUSE_CURSOR_DEFAULT};
+};
+
+bool isNoiseName(const std::string& n) { return n.rfind("Dust", 0) == 0 || n.rfind("Debris", 0) == 0; }
+
+double launchVelocityFactor(const GravityEngine& e) { return e.roomBounds.enabled ? 2.0 : 0.5; }
+
+void loadScene(App& app, SceneId id) {
+    app.engine.loadScene(id);
+    app.selectedId = -1;
+    app.hoveredId = -1;
+    app.dragging = false;
+    app.accumulator = 0.0;
+    app.renderer.followedBodyId = -1;
+    app.renderer.view.followHeaviest = false;
+    app.renderer.fitScene(app.engine.sceneView(), false);
+
+    // Offer payloads that make sense for the scene.
+    const bool room = app.engine.roomBounds.enabled;
+    const LaunchPresetType p = app.launch.presetType;
+    const bool labPreset = p == LaunchPresetType::HeavyAnvil || p == LaunchPresetType::LightApple || p == LaunchPresetType::RubberBall;
+    if (room && !labPreset) {
+        app.launch.applyPreset(LaunchPresetType::RubberBall);
+        if (app.launch.spawnMode == LaunchSpawnMode::CircularOrbit) app.launch.spawnMode = LaunchSpawnMode::Stationary;
+    } else if (!room && labPreset) {
+        app.launch.applyPreset(LaunchPresetType::Terrestrial);
     }
+    app.renderer.pushToast(std::string("Scene: ") + GravityEngine::sceneName(id), theme::kGold);
+}
 
-    double eFinal = engine.computeTotalEnergy();
-    double drift = engine.getEnergyDriftPercent();
-
-    std::cout << "[TEST] Steps executed: " << totalSteps << " (Simulated time: " << totalSteps * engine.fixedDt << "s)\n";
-    std::cout << "[TEST] Final Mechanical Energy E1000 = " << std::setprecision(10) << eFinal << "\n";
-    std::cout << "[TEST] Absolute Energy Drift: " << std::abs(eFinal - e0) << "\n";
-    std::cout << "[TEST] Relative Energy Drift: " << std::setprecision(6) << drift << "%\n";
-
-    // Compare with Symplectic Euler on the identical setup
-    GravityEngine eulerEngine;
-    eulerEngine.loadTwoBodyOrbitTest();
-    eulerEngine.integrator = IntegratorType::SymplecticEuler;
-    eulerEngine.fixedDt = 0.002;
-    double eulerE0 = eulerEngine.computeTotalEnergy();
-    for (int step = 1; step <= totalSteps; ++step) {
-        eulerEngine.step(eulerEngine.fixedDt);
+void cycleCollision(App& app) {
+    GravityEngine& e = app.engine;
+    switch (e.collisionMode) {
+        case CollisionMode::InelasticMerge: e.collisionMode = CollisionMode::DestructiveShatter; break;
+        case CollisionMode::DestructiveShatter: e.collisionMode = CollisionMode::Elastic; break;
+        case CollisionMode::Elastic: e.collisionMode = CollisionMode::None; break;
+        case CollisionMode::None: e.collisionMode = CollisionMode::InelasticMerge; break;
     }
-    double eulerFinal = eulerEngine.computeTotalEnergy();
-    double eulerDrift = eulerEngine.getEnergyDriftPercent();
+    app.renderer.pushToast(std::string("Collisions: ") + e.getCollisionModeName(), theme::kSky);
+}
 
-    std::cout << "\n[COMPARISON] Symplectic Euler E0: " << std::setprecision(10) << eulerE0
-              << ", E1000: " << eulerFinal
-              << ", Energy Drift: " << std::setprecision(6) << eulerDrift << "%\n";
+void setIntegrator(App& app, IntegratorType t) {
+    app.engine.integrator = t;
+    app.engine.markEnergyBaseline();
+    app.renderer.pushToast(std::string("Integrator: ") + app.engine.getIntegratorName(), theme::kSky);
+}
 
-    std::cout << "\n[ASSERTION] Checking condition: drift < 0.01% ... ";
-    if (drift < 0.01) {
-        std::cout << "PASSED! (Velocity Verlet drift = " << drift << "% < 0.01%)\n";
-        std::cout << "========================================================\n";
-        return 0;
-    } else {
-        std::cout << "FAILED! (Drift was " << drift << "% >= 0.01%)\n";
-        std::cout << "========================================================\n";
-        return 1;
+void spawnBody(App& app, Vec2 pos, Vec2 vel) {
+    GravityEngine& e = app.engine;
+    const LaunchSettings& L = app.launch;
+    if (e.getBodyCount() >= e.maxBodies) {
+        app.renderer.pushToast("Body limit reached (" + std::to_string(e.maxBodies) + ")", theme::kDanger);
+        return;
+    }
+    const int id = e.allocateId();
+    Body b(id, L.typeName + " #" + std::to_string(id), L.mass, L.radius, pos, vel, L.color, L.isStatic);
+    b.maxTrailPoints = L.trailLength;
+    e.addBody(std::move(b));
+    e.spawnShockwave(pos, static_cast<float>(L.radius * 3.0 + 12.0), L.color, 140.0f);
+    app.selectedId = id;
+}
+
+Vec2 clampToRoom(const GravityEngine& e, Vec2 p, double radius) {
+    if (!e.roomBounds.enabled) return p;
+    const RoomBounds& rb = e.roomBounds;
+    const double r = std::min(radius, 0.45 * std::min(rb.xMax - rb.xMin, rb.yMax - rb.yMin));
+    return Vec2{std::clamp(p.x, rb.xMin + r, rb.xMax - r), std::clamp(p.y, rb.yMin + r, rb.yMax - r)};
+}
+
+void deselectIfGone(App& app) {
+    if (app.selectedId != -1 && !app.engine.getBodyById(app.selectedId)) app.selectedId = -1;
+    if (app.renderer.followedBodyId != -1 && !app.engine.getBodyById(app.renderer.followedBodyId)) {
+        app.renderer.followedBodyId = -1;
     }
 }
 
+void requestClearAll(App& app) {
+    app.engine.clearBodies();
+    app.selectedId = -1;
+    app.renderer.followedBodyId = -1;
+    app.renderer.pushToast("All bodies cleared", theme::kDanger);
+}
+
+// ---------------------------------------------------------------------------
+// Keyboard
+// ---------------------------------------------------------------------------
+
+void handleKeys(App& app, UiActions& a) {
+    Renderer& r = app.renderer;
+
+    if (IsKeyPressed(KEY_F1) || IsKeyPressed(KEY_SLASH)) a.toggleHelp = true;
+
+    if (IsKeyPressed(KEY_ESCAPE)) {
+        if (r.helpVisible) a.toggleHelp = true;
+        else if (app.dragging) app.dragging = false;
+        else if (app.selectedId != -1) a.deselect = true;
+        else if (r.sidebarVisible) r.sidebarVisible = false;
+    }
+    if (r.helpVisible) return; // the help overlay is modal
+
+    if (IsKeyPressed(KEY_SPACE)) a.togglePause = true;
+    if (IsKeyPressed(KEY_N)) a.stepOnce = true;
+    if (IsKeyPressed(KEY_H)) r.sidebarVisible = !r.sidebarVisible;
+    if (IsKeyPressed(KEY_TAB)) {
+        if (!r.sidebarVisible) {
+            r.sidebarVisible = true;
+        } else {
+            r.activeTab = r.activeTab == SidebarTab::Inspector ? SidebarTab::Spawner
+                        : r.activeTab == SidebarTab::Spawner   ? SidebarTab::World
+                                                               : SidebarTab::Inspector;
+        }
+    }
+
+    const struct {
+        int key;
+        SceneId id;
+    } sceneKeys[] = {{KEY_ONE, SceneId::SolarSystem}, {KEY_TWO, SceneId::FigureEight}, {KEY_THREE, SceneId::BinaryDisk},
+                     {KEY_FOUR, SceneId::EarthRoom},   {KEY_ZERO, SceneId::Empty}};
+    for (const auto& sk : sceneKeys) {
+        if (IsKeyPressed(sk.key)) {
+            a.sceneRequested = true;
+            a.scene = sk.id;
+        }
+    }
+
+    if (IsKeyPressed(KEY_I)) a.cycleIntegrator = true;
+    if (IsKeyPressed(KEY_C)) a.cycleCollision = true;
+    if (IsKeyPressed(KEY_K) && app.selectedId != -1) a.explodeSelected = true;
+    if (IsKeyPressed(KEY_DELETE) && app.selectedId != -1) a.deleteSelected = true;
+
+    if (IsKeyPressed(KEY_T)) r.view.trails = !r.view.trails;
+    if (IsKeyPressed(KEY_V)) r.view.vectors = !r.view.vectors;
+    if (IsKeyPressed(KEY_G)) r.view.grid = !r.view.grid;
+    if (IsKeyPressed(KEY_L)) r.view.labels = !r.view.labels;
+    if (IsKeyPressed(KEY_F)) {
+        r.view.followHeaviest = !r.view.followHeaviest;
+        r.followedBodyId = -1;
+    }
+    if (IsKeyPressed(KEY_R)) a.fitScene = true;
+
+    // X must be pressed twice within 2.5 s: clearing everything is destructive.
+    if (IsKeyPressed(KEY_X)) {
+        if (GetTime() < app.clearArmedUntil) {
+            a.clearAll = true;
+            app.clearArmedUntil = -1.0;
+        } else {
+            app.clearArmedUntil = GetTime() + 2.5;
+            r.pushToast("Press X again to clear all bodies", theme::kWarn);
+        }
+    }
+
+    if (IsKeyPressed(KEY_RIGHT_BRACKET) || IsKeyPressed(KEY_PERIOD)) app.timeScale = std::min(app.timeScale * 1.5f, 20.0f);
+    if (IsKeyPressed(KEY_LEFT_BRACKET) || IsKeyPressed(KEY_COMMA)) app.timeScale = std::max(app.timeScale / 1.5f, 0.1f);
+    if (IsKeyPressed(KEY_EQUAL) || IsKeyPressed(KEY_KP_ADD)) app.launch.scaleMass(1.25);
+    if (IsKeyPressed(KEY_MINUS) || IsKeyPressed(KEY_KP_SUBTRACT)) app.launch.scaleMass(1.0 / 1.25);
+}
+
+// ---------------------------------------------------------------------------
+// Mouse in the world
+// ---------------------------------------------------------------------------
+
+void handleWorldMouse(App& app, bool overUI, Vec2 mouseWorld) {
+    GravityEngine& e = app.engine;
+    Renderer& r = app.renderer;
+
+    if (!overUI && !app.dragging && IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) {
+        if (app.hoveredId != -1) {
+            app.selectedId = app.hoveredId;
+            r.activeTab = SidebarTab::Inspector;
+            r.sidebarVisible = true;
+        } else {
+            const Vec2 pos = clampToRoom(e, mouseWorld, app.launch.radius);
+            switch (app.launch.spawnMode) {
+                case LaunchSpawnMode::Slingshot:
+                    app.dragging = true;
+                    app.dragStart = pos;
+                    app.dragCurrent = mouseWorld;
+                    break;
+                case LaunchSpawnMode::CircularOrbit:
+                    spawnBody(app, pos, e.roomBounds.enabled ? Vec2{} : e.computeCircularOrbitVelocity(pos, app.launch.mass));
+                    break;
+                case LaunchSpawnMode::Stationary:
+                    spawnBody(app, pos, Vec2{});
+                    break;
+            }
+        }
+    }
+
+    if (!app.dragging) return;
+    app.dragCurrent = mouseWorld;
+
+    const float wheel = GetMouseWheelMove();
+    if (wheel != 0.0f) app.launch.scaleMass(std::pow(1.2, static_cast<double>(wheel)));
+
+    if (IsMouseButtonPressed(MOUSE_BUTTON_RIGHT)) {
+        app.dragging = false; // cancel
+        r.pushToast("Launch cancelled", theme::kDim);
+        return;
+    }
+    if (IsMouseButtonReleased(MOUSE_BUTTON_LEFT)) {
+        Vec2 vel = (app.dragStart - app.dragCurrent) * launchVelocityFactor(e);
+        if (vel.length() > 5000.0) vel = vel.normalized() * 5000.0;
+        spawnBody(app, app.dragStart, vel);
+        app.dragging = false;
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Physics with a fixed timestep and a per-frame CPU budget
+// ---------------------------------------------------------------------------
+
+void runPhysics(App& app, float dt) {
+    GravityEngine& e = app.engine;
+    if (!app.stats.paused) {
+        app.accumulator += static_cast<double>(dt) * app.timeScale;
+    } else if (app.pendingStep) {
+        app.accumulator += app.timeScale / 60.0;
+    }
+    app.pendingStep = false;
+
+    const double budget = 0.012; // seconds of CPU per frame for physics
+    const double start = GetTime();
+    int steps = 0;
+    double simulated = 0.0;
+    bool lagging = false;
+    while (app.accumulator >= e.fixedDt) {
+        e.step(e.fixedDt);
+        app.accumulator -= e.fixedDt;
+        simulated += e.fixedDt;
+        ++steps;
+        if ((steps & 7) == 0 && GetTime() - start > budget) {
+            // Can't keep up: drop the backlog instead of spiralling, and say so.
+            lagging = app.accumulator >= e.fixedDt;
+            app.accumulator = 0.0;
+            break;
+        }
+    }
+    if (simulated > 0.0) e.updateEffects(simulated);
+
+    app.stats.stepsLastFrame = steps;
+    if (lagging) app.lagHold = 0.75f;
+    app.lagHold = std::max(0.0f, app.lagHold - dt);
+    app.stats.lagging = app.lagHold > 0.0f;
+    if (!app.stats.paused && dt > 0.0f) {
+        const float actual = static_cast<float>(simulated / dt);
+        app.stats.actualSpeed += (actual - app.stats.actualSpeed) * std::min(1.0f, dt * 4.0f);
+    }
+}
+
+void drainEvents(App& app) {
+    GravityEngine& e = app.engine;
+    Renderer& r = app.renderer;
+    for (const SimEvent& ev : e.events) {
+        // Dust/debris events are counted but don't get a toast (the disk scene has hundreds).
+        const bool noisy = isNoiseName(ev.nameA) || isNoiseName(ev.nameB);
+        switch (ev.type) {
+            case SimEventType::Merge:
+                ++app.stats.merges;
+                if (!noisy) r.pushToast(ev.nameA + " + " + ev.nameB + " merged", theme::kViolet);
+                break;
+            case SimEventType::Shatter:
+                ++app.stats.shatters;
+                if (!noisy) r.pushToast(ev.nameA + " and " + ev.nameB + " SHATTERED!", theme::kDanger);
+                break;
+            case SimEventType::Explosion:
+                ++app.stats.explosions;
+                r.pushToast(ev.nameA + " exploded!", theme::kWarn);
+                break;
+            case SimEventType::FloorShatter:
+                ++app.stats.shatters;
+                if (!noisy) r.pushToast(ev.nameA + " shattered on impact!", theme::kDanger);
+                break;
+        }
+        // Keep selection and camera lock on the merged body.
+        const int replacement = ev.type == SimEventType::Merge ? ev.survivorId : -1;
+        if (app.selectedId == ev.absorbedId) app.selectedId = replacement;
+        if (r.followedBodyId == ev.absorbedId) r.followedBodyId = replacement;
+        if (ev.type == SimEventType::Shatter && app.selectedId == ev.survivorId) app.selectedId = -1;
+    }
+    e.events.clear();
+    deselectIfGone(app);
+}
+
+void applyActions(App& app, const UiActions& a) {
+    GravityEngine& e = app.engine;
+    Renderer& r = app.renderer;
+
+    if (a.toggleHelp) r.helpVisible = !r.helpVisible;
+    if (a.sceneRequested) loadScene(app, a.scene);
+    if (a.togglePause) app.stats.paused = !app.stats.paused;
+    if (a.stepOnce) {
+        app.stats.paused = true;
+        app.pendingStep = true;
+    }
+    if (a.cycleIntegrator) {
+        setIntegrator(app, e.integrator == IntegratorType::VelocityVerlet ? IntegratorType::SymplecticEuler
+                                                                          : IntegratorType::VelocityVerlet);
+    }
+    if (a.setIntegrator && a.integrator != e.integrator) setIntegrator(app, a.integrator);
+    if (a.cycleCollision) cycleCollision(app);
+    if (a.setCollisionMode && a.collisionMode != e.collisionMode) {
+        e.collisionMode = a.collisionMode;
+        r.pushToast(std::string("Collisions: ") + e.getCollisionModeName(), theme::kSky);
+    }
+    if (a.bodyEdited || a.physicsEdited) e.notifyBodiesEdited();
+    if (a.circularizeSelected && app.selectedId != -1) e.circularizeOrbit(app.selectedId);
+    if (a.explodeSelected && app.selectedId != -1) {
+        if (e.explodeBody(app.selectedId)) app.selectedId = -1;
+        else r.pushToast("Can't explode: body limit reached", theme::kDanger);
+    }
+    if (a.deleteSelected && app.selectedId != -1) {
+        e.deleteBody(app.selectedId);
+        app.selectedId = -1;
+    }
+    if (a.deselect) app.selectedId = -1;
+    if (a.clearAll) requestClearAll(app);
+    if (a.fitScene) r.fitScene(e.sceneView(), false);
+    deselectIfGone(app);
+}
+
+// ---------------------------------------------------------------------------
+// One frame
+// ---------------------------------------------------------------------------
+
+void frame(App& app) {
+    GravityEngine& e = app.engine;
+    Renderer& r = app.renderer;
+    const float dt = std::min(GetFrameTime(), 0.1f);
+
+    r.beginFrame(dt);
+    UiActions actions;
+
+    const Vector2 mouse = GetMousePosition();
+    const bool overUI = r.helpVisible || r.ui.mouseOverUI(mouse);
+
+    handleKeys(app, actions);
+
+    if (IsMouseButtonPressed(MOUSE_BUTTON_RIGHT) && !overUI && !app.dragging) app.rightPanning = true;
+    if (!IsMouseButtonDown(MOUSE_BUTTON_RIGHT)) app.rightPanning = false;
+    r.updateCamera(dt, !overUI && !app.dragging, app.rightPanning, !r.helpVisible);
+
+    // Camera follow: locked body first, else the heaviest body.
+    if (r.followedBodyId != -1) {
+        if (const Body* b = e.getBodyById(r.followedBodyId)) r.followPoint(b->pos, dt);
+        else r.followedBodyId = -1;
+    } else if (r.view.followHeaviest && !e.bodies.empty()) {
+        const auto heaviest = std::max_element(e.bodies.begin(), e.bodies.end(),
+                                               [](const Body& x, const Body& y) { return x.mass < y.mass; });
+        r.followPoint(heaviest->pos, dt);
+    }
+
+    const Vec2 mouseWorld = r.screenToWorld(mouse);
+    app.hoveredId = (!overUI && !app.dragging) ? e.findNearestBody(mouseWorld, r.pickPaddingWorld()) : -1;
+    if (!r.helpVisible) handleWorldMouse(app, overUI, mouseWorld);
+
+    runPhysics(app, dt);
+    drainEvents(app);
+
+    SlingshotView sling;
+    if (app.dragging) {
+        sling.active = true;
+        sling.start = app.dragStart;
+        sling.current = app.dragCurrent;
+        sling.launchVel = (app.dragStart - app.dragCurrent) * launchVelocityFactor(e);
+        sling.radius = app.launch.radius;
+        sling.color = app.launch.color;
+        app.prediction = e.predictTrajectory(app.dragStart, sling.launchVel, app.launch.radius, app.launch.predictionSteps, 0.01);
+        sling.prediction = &app.prediction;
+    }
+
+    // --- Draw ---
+    BeginDrawing();
+    ClearBackground(theme::kBg);
+    r.drawBackground();
+
+    const Vector2 savedTarget = r.camera.target;
+    if (!app.stats.paused && e.effects.cameraShake > 0.1f) {
+        const float ang = static_cast<float>(GetRandomValue(0, 360)) * DEG2RAD;
+        const float dist = static_cast<float>(GetRandomValue(5, 100)) * 0.01f * e.effects.cameraShake / r.camera.zoom;
+        r.camera.target.x += std::cos(ang) * dist;
+        r.camera.target.y += std::sin(ang) * dist;
+    }
+    BeginMode2D(r.camera);
+    r.drawWorld(e, app.selectedId, app.hoveredId, sling);
+    EndMode2D();
+    r.camera.target = savedTarget;
+
+    r.ui.inputEnabled = !r.helpVisible;
+    r.drawWorldOverlay(e, app.selectedId, app.hoveredId, sling);
+    r.drawHud(e, app.stats, app.timeScale, actions);
+    r.drawTimeBar(app.stats, app.timeScale, actions);
+    r.drawSidebar(e, e.getBodyById(app.selectedId), app.launch, app.hoveredId, actions);
+    r.drawToasts();
+    r.drawFlash(e.effects.flash);
+    if (r.helpVisible) {
+        r.ui.inputEnabled = true;
+        r.drawHelp(actions);
+    }
+    r.endFrame();
+    EndDrawing();
+
+    const int cursor = (app.hoveredId != -1 || r.ui.wantsHandCursor()) ? MOUSE_CURSOR_POINTING_HAND
+                     : app.dragging                                   ? MOUSE_CURSOR_CROSSHAIR
+                                                                      : MOUSE_CURSOR_DEFAULT;
+    if (cursor != app.cursor) {
+        SetMouseCursor(cursor);
+        app.cursor = cursor;
+    }
+
+    applyActions(app, actions);
+}
+
+void sizeWindowToMonitor() {
+    const int mon = GetCurrentMonitor();
+    const int mw = GetMonitorWidth(mon);
+    const int mh = GetMonitorHeight(mon);
+    if (mw <= 0 || mh <= 0) return;
+    const int w = std::clamp(static_cast<int>(mw * 0.85f), 960, 2600);
+    const int h = std::clamp(static_cast<int>(mh * 0.85f), 620, 1600);
+    SetWindowSize(std::min(w, mw), std::min(h, mh));
+    const Vector2 mp = GetMonitorPosition(mon);
+    SetWindowPosition(static_cast<int>(mp.x) + (mw - std::min(w, mw)) / 2, static_cast<int>(mp.y) + (mh - std::min(h, mh)) / 2);
+}
+
+} // namespace
+
 int main(int argc, char* argv[]) {
-    // Check for --test CLI flag
     for (int i = 1; i < argc; ++i) {
         if (std::strcmp(argv[i], "--test") == 0 || std::strcmp(argv[i], "-t") == 0) {
-            return runHeadlessPhysicsTest();
+            return runPhysicsTests() == 0 ? 0 : 1;
         }
     }
-
-    // Interactive graphical window
-    const int screenWidth = 1440;
-    const int screenHeight = 900;
 
     SetConfigFlags(FLAG_WINDOW_RESIZABLE | FLAG_MSAA_4X_HINT | FLAG_VSYNC_HINT);
-    InitWindow(screenWidth, screenHeight, "2D N-Body Gravity Engine (C++20)");
+    InitWindow(1280, 800, "Gravity Engine - 2D N-Body Sandbox");
+    SetExitKey(KEY_NULL); // ESC is handled by the app (close / cancel / deselect), not "quit"
+    SetWindowMinSize(900, 600);
+    sizeWindowToMonitor();
     SetTargetFPS(60);
 
-    GravityEngine engine;
-    Renderer renderer(screenWidth, screenHeight);
-    LaunchSettings launchSettings;
+    {
+        App app;
+        app.renderer.init();
+        app.renderer.fitScene(app.engine.sceneView(), true);
+        app.renderer.pushToast("Welcome! Drag in space to launch a planet - F1 for controls", theme::kGold);
 
-    double fixedDt = 0.002;
-    float timeScale = 1.0f;
-    bool isPaused = false;
-    double accumulator = 0.0;
+        while (!WindowShouldClose()) frame(app);
 
-    // Selection & Spawner state
-    int selectedBodyId = -1;
-
-    // Slingshot spawning state
-    bool isDragging = false;
-    Vec2 dragStartWorld{0.0, 0.0};
-    Vec2 dragCurrentWorld{0.0, 0.0};
-    int nextSpawnId = 1000;
-
-    while (!WindowShouldClose()) {
-        int currentW = GetScreenWidth();
-        int currentH = GetScreenHeight();
-        float dt = GetFrameTime();
-        if (dt > 0.1f) dt = 0.1f; // Clamp against spiral of death
-
-        // --- Keyboard Shortcuts & Input Handling ---
-
-        // Pause toggle
-        if (IsKeyPressed(KEY_SPACE)) {
-            isPaused = !isPaused;
-        }
-
-        // Toggle Right Sidebar visibility [H]
-        if (IsKeyPressed(KEY_H)) {
-            renderer.sidebarVisible = !renderer.sidebarVisible;
-        }
-
-        // Toggle Sidebar Spawner Tab [TAB]
-        if (IsKeyPressed(KEY_TAB)) {
-            if (!renderer.sidebarVisible) {
-                renderer.sidebarVisible = true;
-                renderer.activeTab = SidebarTab::Spawner;
-            } else {
-                renderer.activeTab = (renderer.activeTab == SidebarTab::Spawner)
-                                     ? SidebarTab::Inspector : SidebarTab::Spawner;
-            }
-        }
-
-        // Deselect or close sidebar with ESC
-        if (IsKeyPressed(KEY_ESCAPE)) {
-            if (selectedBodyId != -1) {
-                selectedBodyId = -1;
-            } else if (renderer.sidebarVisible) {
-                renderer.sidebarVisible = false;
-            }
-        }
-
-        // Preset loading
-        if (IsKeyPressed(KEY_ONE)) {
-            engine.loadSolarSystem();
-            renderer.resetCamera(currentW, currentH);
-            selectedBodyId = -1;
-        }
-        if (IsKeyPressed(KEY_TWO)) {
-            engine.loadFigureEight();
-            renderer.resetCamera(currentW, currentH);
-            selectedBodyId = -1;
-        }
-        if (IsKeyPressed(KEY_THREE)) {
-            engine.loadBinaryDisk();
-            renderer.resetCamera(currentW, currentH);
-            selectedBodyId = -1;
-        }
-        if (IsKeyPressed(KEY_FOUR)) {
-            engine.loadEarthRoom();
-            renderer.resetCamera(currentW, currentH);
-            renderer.camera.target = Vector2{0.0f, -20.0f};
-            renderer.camera.zoom = 1.05f;
-            selectedBodyId = -1;
-        }
-
-        // Integrator toggle
-        if (IsKeyPressed(KEY_I)) {
-            if (engine.integrator == IntegratorType::VelocityVerlet) {
-                engine.integrator = IntegratorType::SymplecticEuler;
-            } else {
-                engine.integrator = IntegratorType::VelocityVerlet;
-            }
-        }
-
-        // Collision mode toggle
-        if (IsKeyPressed(KEY_C)) {
-            if (engine.collisionMode == CollisionMode::InelasticMerge) {
-                engine.collisionMode = CollisionMode::DestructiveShatter;
-            } else if (engine.collisionMode == CollisionMode::DestructiveShatter) {
-                engine.collisionMode = CollisionMode::Elastic;
-            } else if (engine.collisionMode == CollisionMode::Elastic) {
-                engine.collisionMode = CollisionMode::None;
-            } else {
-                engine.collisionMode = CollisionMode::InelasticMerge;
-            }
-        }
-
-        // Cataclysmic Destruction Hotkey [K]
-        if (IsKeyPressed(KEY_K) && selectedBodyId != -1) {
-            engine.triggerDestructionExplosion(selectedBodyId);
-            selectedBodyId = -1;
-        }
-
-        // Visual toggles
-        if (IsKeyPressed(KEY_T)) renderer.showTrails = !renderer.showTrails;
-        if (IsKeyPressed(KEY_V)) renderer.showVelocityVectors = !renderer.showVelocityVectors;
-        if (IsKeyPressed(KEY_G)) renderer.showGrid = !renderer.showGrid;
-        if (IsKeyPressed(KEY_F)) renderer.followHeaviest = !renderer.followHeaviest;
-
-        // Reset camera
-        if (IsKeyPressed(KEY_R)) {
-            renderer.resetCamera(currentW, currentH);
-            selectedBodyId = -1;
-        }
-
-        // Clear all bodies
-        if (IsKeyPressed(KEY_X)) {
-            engine.clearBodies();
-            selectedBodyId = -1;
-        }
-
-        // Time-scaling controls: Left/Right brackets or < / >
-        if (IsKeyPressed(KEY_RIGHT_BRACKET) || IsKeyPressed(KEY_PERIOD)) {
-            timeScale = std::min(timeScale + 0.5f, 10.0f);
-        }
-        if (IsKeyPressed(KEY_LEFT_BRACKET) || IsKeyPressed(KEY_COMMA)) {
-            timeScale = std::max(timeScale - 0.5f, 0.25f);
-        }
-
-        // Spawn mass adjustment via +/- keys
-        if (IsKeyPressed(KEY_EQUAL) || IsKeyPressed(KEY_KP_ADD)) {
-            launchSettings.mass = std::min(launchSettings.mass * 1.25, 200000.0);
-            launchSettings.recalculateRadiusFromDensity();
-        }
-        if (IsKeyPressed(KEY_MINUS) || IsKeyPressed(KEY_KP_SUBTRACT)) {
-            launchSettings.mass = std::max(launchSettings.mass / 1.25, 0.01);
-            launchSettings.recalculateRadiusFromDensity();
-        }
-
-        // Camera update (pan, zoom)
-        renderer.updateCamera(dt);
-
-        // Follow selected locked body or heaviest body
-        if (renderer.followedBodyId != -1) {
-            Body* followed = engine.getBodyById(renderer.followedBodyId);
-            if (followed) {
-                renderer.camera.target = followed->pos.toVector2();
-            } else {
-                renderer.followedBodyId = -1;
-            }
-        } else if (renderer.followHeaviest && !engine.bodies.empty()) {
-            size_t heaviestIdx = 0;
-            double maxMass = -1.0;
-            for (size_t i = 0; i < engine.bodies.size(); ++i) {
-                if (engine.bodies[i].mass > maxMass) {
-                    maxMass = engine.bodies[i].mass;
-                    heaviestIdx = i;
-                }
-            }
-            renderer.camera.target = engine.bodies[heaviestIdx].pos.toVector2();
-        }
-
-        // Mouse interactions in world coordinates
-        Vector2 mouseScreen = GetMousePosition();
-        Vec2 mouseWorld = renderer.screenToWorld(mouseScreen);
-        bool mouseOverUI = renderer.isMouseOverUI(mouseScreen, currentW, currentH);
-
-        // Object selection & Launch Spawning
-        if (!mouseOverUI) {
-            if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) {
-                // Check if user clicked on an existing body
-                int clickedId = engine.findNearestBody(mouseWorld, 28.0 / renderer.camera.zoom);
-                if (clickedId != -1) {
-                    selectedBodyId = clickedId;
-                    renderer.activeTab = SidebarTab::Inspector;
-                    renderer.sidebarVisible = true; // Auto-open sidebar when clicking an object
-                    isDragging = false;
-                } else {
-                    // Clicked on empty space
-                    if (launchSettings.spawnMode == LaunchSpawnMode::CircularOrbit) {
-                        Vec2 spawnVel = engine.roomBounds.enabled ? Vec2{0.0, 0.0} : engine.computeCircularOrbitVelocity(mouseWorld);
-                        int spawnedId = nextSpawnId++;
-                        Body newBody(spawnedId, launchSettings.typeName + " #" + std::to_string(spawnedId),
-                                     launchSettings.mass, launchSettings.radius, mouseWorld, spawnVel,
-                                     launchSettings.color, launchSettings.isStatic);
-                        newBody.maxTrailPoints = launchSettings.trailLength;
-                        engine.addBody(newBody);
-                        selectedBodyId = spawnedId;
-                        renderer.activeTab = SidebarTab::Inspector;
-                        renderer.sidebarVisible = true;
-                    } else if (launchSettings.spawnMode == LaunchSpawnMode::Stationary) {
-                        int spawnedId = nextSpawnId++;
-                        Body newBody(spawnedId, launchSettings.typeName + " #" + std::to_string(spawnedId),
-                                     launchSettings.mass, launchSettings.radius, mouseWorld, Vec2{0.0, 0.0},
-                                     launchSettings.color, launchSettings.isStatic);
-                        newBody.maxTrailPoints = launchSettings.trailLength;
-                        engine.addBody(newBody);
-                        selectedBodyId = spawnedId;
-                        renderer.activeTab = SidebarTab::Inspector;
-                        renderer.sidebarVisible = true;
-                    } else {
-                        // Slingshot drag launch mode
-                        selectedBodyId = -1;
-                        isDragging = true;
-                        dragStartWorld = mouseWorld;
-                        dragCurrentWorld = mouseWorld;
-                    }
-                }
-            }
-        }
-
-        if (isDragging) {
-            dragCurrentWorld = mouseWorld;
-
-            // Adjust launch mass via mouse wheel while dragging
-            float wheel = GetMouseWheelMove();
-            if (wheel > 0.0f) {
-                launchSettings.mass = std::min(launchSettings.mass * 1.2, 200000.0);
-                launchSettings.recalculateRadiusFromDensity();
-            }
-            if (wheel < 0.0f) {
-                launchSettings.mass = std::max(launchSettings.mass / 1.2, 0.01);
-                launchSettings.recalculateRadiusFromDensity();
-            }
-
-            if (IsMouseButtonReleased(MOUSE_BUTTON_LEFT)) {
-                const double velFactor = 0.5;
-                Vec2 spawnVel = (dragStartWorld - dragCurrentWorld) * velFactor;
-
-                int spawnedId = nextSpawnId++;
-                Body newBody(spawnedId, launchSettings.typeName + " #" + std::to_string(spawnedId),
-                             launchSettings.mass, launchSettings.radius, dragStartWorld, spawnVel,
-                             launchSettings.color, launchSettings.isStatic);
-                newBody.maxTrailPoints = launchSettings.trailLength;
-                engine.addBody(newBody);
-
-                isDragging = false;
-                selectedBodyId = spawnedId;
-                renderer.activeTab = SidebarTab::Inspector;
-                renderer.sidebarVisible = true;
-            }
-        }
-
-        // --- Physics Fixed-Timestep Accumulator Loop ---
-        if (!isPaused) {
-            accumulator += dt * timeScale;
-            if (accumulator > 0.2) accumulator = 0.2; // Cap accumulator to avoid spiral of death
-
-            while (accumulator >= fixedDt) {
-                engine.step(fixedDt);
-                engine.updateParticles(fixedDt);
-                accumulator -= fixedDt;
-            }
-        } else {
-            // When paused, still decay particles smoothly
-            engine.updateParticles(dt * 0.5);
-        }
-
-        // --- Rendering ---
-        BeginDrawing();
-        ClearBackground(Color{10, 12, 20, 255}); // Deep space aesthetic
-
-        // Apply dynamic impact camera shake
-        Vector2 savedCamTarget = renderer.camera.target;
-        if (engine.cameraShakeIntensity > 0.1f) {
-            float shakeAngle = static_cast<float>(GetRandomValue(0, 360)) * (3.14159265f / 180.0f);
-            float shakeDist = static_cast<float>(GetRandomValue(5, 100)) * 0.01f * engine.cameraShakeIntensity;
-            renderer.camera.target.x += std::cos(shakeAngle) * shakeDist;
-            renderer.camera.target.y += std::sin(shakeAngle) * shakeDist;
-        }
-
-        // 1. World-Space Rendering
-        BeginMode2D(renderer.camera);
-
-        renderer.drawGrid();
-        renderer.drawRoom(engine);
-        renderer.drawTrails(engine.bodies);
-        renderer.drawBodies(engine.bodies, selectedBodyId);
-
-        // Draw destruction sparks, fireballs, and shockwaves
-        renderer.drawDestructionEffects(engine);
-
-        // Highlight selected body reticle
-        if (selectedBodyId != -1) {
-            const Body* sel = engine.getBodyById(selectedBodyId);
-            if (sel) {
-                renderer.drawSelectionReticle(*sel);
-            }
-        }
-
-        renderer.drawVelocityVectors(engine.bodies);
-
-        // Draw slingshot aiming & trajectory preview
-        if (isDragging) {
-            const double velFactor = 0.5;
-            Vec2 launchVel = (dragStartWorld - dragCurrentWorld) * velFactor;
-
-            // Pull-back line
-            DrawLineEx(dragStartWorld.toVector2(), dragCurrentWorld.toVector2(), 2.0f, Fade(YELLOW, 0.7f));
-            DrawCircleV(dragCurrentWorld.toVector2(), 4.0f, RED);
-
-            // Real-time predicted trajectory arc
-            auto trajectory = engine.predictTrajectory(dragStartWorld, launchVel, launchSettings.mass,
-                                                      launchSettings.trajectorySteps, 0.005);
-            renderer.drawTrajectoryPreview(trajectory, dragStartWorld, launchSettings.radius, launchSettings.color);
-        }
-
-        EndMode2D();
-        renderer.camera.target = savedCamTarget; // Restore camera target after shake
-
-        // 2. Screen-Space UI Panels
-        renderer.drawHUD(engine, timeScale, isPaused, launchSettings, currentW, currentH);
-
-        // Draw Enlarged Full-Height Right Sidebar (Inspector & Spawner Tabs) with Hide/Show
-        Body* sel = (selectedBodyId != -1) ? engine.getBodyById(selectedBodyId) : nullptr;
-        bool shouldDeselect = false;
-        bool shouldDelete = false;
-
-        renderer.drawSidebar(sel, engine, launchSettings, currentW, currentH, shouldDeselect, shouldDelete);
-
-        if (shouldDelete) {
-            engine.deleteBody(selectedBodyId);
-            selectedBodyId = -1;
-        } else if (shouldDeselect) {
-            selectedBodyId = -1;
-        }
-
-        EndDrawing();
+        app.renderer.shutdown(); // free fonts while the GL context still exists
     }
-
     CloseWindow();
     return 0;
 }

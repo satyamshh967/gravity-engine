@@ -2,76 +2,165 @@
 
 #include "GravityEngine.hpp"
 #include "LaunchSettings.hpp"
+#include "Ui.hpp"
+
 #include <raylib.h>
+
+#include <string>
+#include <utility>
 #include <vector>
 
-enum class SidebarTab {
-    Inspector,
-    Spawner
+enum class SidebarTab { Inspector, Spawner, World };
+
+struct ViewOptions {
+    bool trails{true};
+    bool vectors{false};
+    bool grid{true};
+    bool labels{true};
+    bool followHeaviest{false};
+};
+
+struct SlingshotView {
+    bool active{false};
+    Vec2 start{};
+    Vec2 current{};
+    Vec2 launchVel{};
+    double radius{5.0};
+    Rgba color{};
+    const TrajectoryPrediction* prediction{nullptr};
+};
+
+struct SimStats {
+    bool paused{false};
+    int stepsLastFrame{0};
+    float actualSpeed{1.0f};
+    bool lagging{false};
+    int merges{0};
+    int shatters{0};
+    int explosions{0};
+};
+
+// Everything the UI asks the app to do this frame. The renderer never changes
+// the simulation's structure itself; the app applies these after drawing.
+struct UiActions {
+    bool sceneRequested{false};
+    SceneId scene{SceneId::Empty};
+    bool deselect{false};
+    bool deleteSelected{false};
+    bool explodeSelected{false};
+    bool circularizeSelected{false};
+    bool bodyEdited{false};    // selected body's properties changed
+    bool physicsEdited{false}; // G, softening, room parameters changed
+    bool clearAll{false};
+    bool togglePause{false};
+    bool stepOnce{false};
+    bool toggleHelp{false};
+    bool cycleIntegrator{false};
+    bool cycleCollision{false};
+    bool setCollisionMode{false};
+    CollisionMode collisionMode{CollisionMode::InelasticMerge};
+    bool setIntegrator{false};
+    IntegratorType integrator{IntegratorType::VelocityVerlet};
+    bool fitScene{false};
+};
+
+// Display units: the Earth room is metric (pixelsPerMeter), space uses
+// simulation units (mass M, distance px, time s).
+struct Units {
+    bool metric{false};
+    double ppm{1.0};
+    [[nodiscard]] std::string mass(double m) const;
+    [[nodiscard]] std::string dist(double px) const;
+    [[nodiscard]] std::string speed(double pxPerS) const;
+    [[nodiscard]] std::string accel(double pxPerS2) const;
+    [[nodiscard]] std::string vec(Vec2 v, bool velocity) const;
+};
+[[nodiscard]] Units unitsFor(const GravityEngine& e);
+[[nodiscard]] std::string fmtNum(double v);
+
+struct Toast {
+    std::string text;
+    Color color{WHITE};
+    float age{0.0f};
+    float life{3.2f};
 };
 
 class Renderer {
 public:
+    Ui ui;
     Camera2D camera{};
-    bool showTrails{true};
-    bool showVelocityVectors{true};
-    bool showGrid{true};
-    bool followHeaviest{false};
+    ViewOptions view;
+    SidebarTab activeTab{SidebarTab::Inspector};
+    bool sidebarVisible{true};
+    bool helpVisible{false};
     int followedBodyId{-1};
 
-    // Typography
-    Font uiFont{};
-    Font boldFont{};
-    bool fontLoaded{false};
+    void init();     // after InitWindow
+    void shutdown(); // before CloseWindow (GPU resources need a live context)
 
-    // Sidebar state & dimensions (Enlarged and spacious)
-    float sidebarWidth{520.0f};
-    bool sidebarVisible{true};
-    SidebarTab activeTab{SidebarTab::Inspector};
+    void beginFrame(float dt);
+    void endFrame();
 
-    float animTime{0.0f};
+    // --- Camera ---
+    [[nodiscard]] Rectangle viewport() const; // on-screen area not covered by the sidebar
+    void updateCamera(float dt, bool allowWheelZoom, bool allowDragPan, bool allowKeyPan);
+    void followPoint(Vec2 p, float dt);
+    void fitScene(const SceneView& v, bool instant);
+    [[nodiscard]] Vec2 screenToWorld(Vector2 p) const;
+    [[nodiscard]] Vector2 worldToScreen(Vec2 p) const;
+    [[nodiscard]] double pickPaddingWorld() const { return ui.s(10.0f) / camera.zoom; }
 
-    Renderer(int screenWidth, int screenHeight);
-    ~Renderer();
+    // --- Drawing ---
+    void drawBackground();
+    void drawWorld(const GravityEngine& e, int selectedId, int hoveredId, const SlingshotView& sling);
+    void drawWorldOverlay(const GravityEngine& e, int selectedId, int hoveredId, const SlingshotView& sling);
+    void drawHud(const GravityEngine& e, const SimStats& stats, float timeScale, UiActions& a);
+    void drawTimeBar(const SimStats& stats, float& timeScale, UiActions& a);
+    void drawSidebar(GravityEngine& e, Body* selected, LaunchSettings& launch, int hoveredId, UiActions& a);
+    void drawToasts();
+    void drawHelp(UiActions& a);
+    void drawFlash(float flash);
 
-    void initFonts();
-    void unloadFonts();
+    void pushToast(std::string text, Color color);
 
-    // Typography helpers
-    void drawText(const char* text, float x, float y, float size, Color col, bool bold = false) const;
-    float measureText(const char* text, float size, bool bold = false) const;
+    // Short human-readable description of how a body is moving.
+    [[nodiscard]] std::pair<std::string, Color> describeMotion(const GravityEngine& e, const Body& b) const;
 
-    // Camera controls
-    void updateCamera(float deltaTime);
-    void resetCamera(int screenWidth, int screenHeight);
+private:
+    struct Star {
+        float x, y, size, phase, speed, depth;
+    };
 
-    // Drawing functions in World Space
-    void drawGrid() const;
-    void drawRoom(const GravityEngine& engine) const;
-    void drawTrails(const std::vector<Body>& bodies) const;
-    void drawBodies(const std::vector<Body>& bodies, int selectedId = -1) const;
-    void drawVelocityVectors(const std::vector<Body>& bodies) const;
-    void drawDestructionEffects(const GravityEngine& engine) const;
-    void drawSelectionReticle(const Body& body) const;
-    void drawTrajectoryPreview(const std::vector<Vec2>& trajectoryPoints,
-                               Vec2 spawnPos, double spawnRadius, Color spawnColor) const;
+    [[nodiscard]] float sidebarWidth() const;
+    [[nodiscard]] float sidebarVisibleWidth() const;
+    [[nodiscard]] Rectangle visibleWorldRect() const;
 
-    // HUD & Interactive Sidebar in Screen Space
-    void drawHUD(const GravityEngine& engine, float timeScale, bool isPaused,
-                 const LaunchSettings& launchSettings, int screenWidth, int screenHeight) const;
+    void ring(Vector2 c, float radius, float thickWorld, Color col) const;
+    void drawGrid();
+    void drawRoom(const GravityEngine& e) const;
+    void drawTrails(const GravityEngine& e) const;
+    void drawBodies(const GravityEngine& e, int selectedId, int hoveredId) const;
+    void drawEffects(const GravityEngine& e) const;
+    void drawReticle(const Body& b) const;
+    void drawVectors(const GravityEngine& e) const;
+    void drawSlingshot(const GravityEngine& e, const SlingshotView& s) const;
 
-    void drawSidebar(Body* selectedBody, GravityEngine& engine, LaunchSettings& launchSettings,
-                     int screenWidth, int screenHeight, bool& shouldDeselect, bool& shouldDelete);
+    // Sidebar tabs (Sidebar.cpp); each returns the y below its content.
+    float drawInspectorTab(GravityEngine& e, Body* sel, int hoveredId, float x, float y, float w, UiActions& a);
+    float drawSpawnerTab(const GravityEngine& e, LaunchSettings& launch, float x, float y, float w);
+    float drawWorldTab(GravityEngine& e, float x, float y, float w, UiActions& a);
+    float drawSceneButtons(const GravityEngine& e, float x, float y, float w, UiActions& a);
 
-    void drawSidebarTogglePill(int screenWidth, int screenHeight);
+    float sidebarAnim_{1.0f};
+    float scrollTarget_{0.0f};
+    float scroll_{0.0f};
+    float contentHeight_{0.0f};
+    float clearConfirm_{0.0f};
 
-    [[nodiscard]] bool isMouseOverUI(Vector2 mousePos, int screenWidth, int screenHeight) const;
+    bool camAnimating_{false};
+    Vector2 goalTarget_{};
+    float goalZoom_{1.0f};
 
-    // Coordinate conversion
-    [[nodiscard]] Vec2 screenToWorld(Vector2 screenPos) const;
-    [[nodiscard]] Vector2 worldToScreen(Vec2 worldPos) const;
-
-    // UI helper widgets
-    bool DrawButton(Rectangle rect, const char* text, Color bg, Color textCol, bool isActive = false, float fontSize = 14.0f) const;
-    void DrawCard(Rectangle rect, const char* title = nullptr, Color titleCol = GOLD) const;
+    std::vector<Toast> toasts_;
+    std::vector<Star> stars_;
 };
